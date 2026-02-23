@@ -1,19 +1,29 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 type AuthMode = "login" | "signup";
-type OtpChannel = "EMAIL" | "SMS";
-type OtpState = "idle" | "sent" | "invalid" | "expired" | "rate_limited" | "verified";
+type AuthState =
+  | "idle"
+  | "authenticated"
+  | "signup_done"
+  | "totp_setup_ready"
+  | "totp_verified"
+  | "invalid"
+  | "expired"
+  | "rate_limited";
 
-type OtpRequestSuccess = {
-  status: "OTP_SENT";
-  challengeId: string;
+type SetupResponse = {
+  status: "SETUP_CREATED";
+  credentialId: string;
+  issuer: string;
+  label: string;
+  otpauthUri: string;
+  qrCodeDataUrl: string;
+  secret: string;
   maskedIdentifier: string;
-  expiresInSeconds: number;
-  resendInSeconds: number;
-  debugCode?: string;
 };
 
 function formatTimer(totalSeconds: number) {
@@ -69,20 +79,19 @@ function AppleLogo() {
 
 export function AuthGateway() {
   const [mode, setMode] = useState<AuthMode>("login");
-  const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
-  const [otpCode, setOtpCode] = useState("");
-  const [activeChannel, setActiveChannel] = useState<OtpChannel | null>(null);
-  const [otpState, setOtpState] = useState<OtpState>("idle");
+  const [state, setState] = useState<AuthState>("idle");
+  const [identifier, setIdentifier] = useState("");
+  const [password, setPassword] = useState("");
+  const [totpCode, setTotpCode] = useState("");
+  const [totpEnabled, setTotpEnabled] = useState(false);
+  const [credentialId, setCredentialId] = useState<string | null>(null);
+  const [secret, setSecret] = useState<string | null>(null);
+  const [otpauthUri, setOtpauthUri] = useState<string | null>(null);
+  const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string | null>(null);
   const [maskedIdentifier, setMaskedIdentifier] = useState<string | null>(null);
-  const [challengeId, setChallengeId] = useState<string | null>(null);
-  const [resendAvailableAt, setResendAvailableAt] = useState<number | null>(null);
-  const [codeExpiresAt, setCodeExpiresAt] = useState<number | null>(null);
-  const [rateLimitedUntil, setRateLimitedUntil] = useState<number | null>(null);
-  const [debugCode, setDebugCode] = useState<string | null>(null);
   const [fieldError, setFieldError] = useState<string | null>(null);
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [sendingChannel, setSendingChannel] = useState<OtpChannel | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [rateLimitedUntil, setRateLimitedUntil] = useState<number | null>(null);
   const [now, setNow] = useState<number>(() => Date.now());
 
   useEffect(() => {
@@ -90,183 +99,194 @@ export function AuthGateway() {
     return () => window.clearInterval(intervalId);
   }, []);
 
-  const resendRemaining = useMemo(() => {
-    if (!resendAvailableAt) return 0;
-    return Math.max(0, Math.ceil((resendAvailableAt - now) / 1000));
-  }, [resendAvailableAt, now]);
-
-  const expiryRemaining = useMemo(() => {
-    if (!codeExpiresAt) return 0;
-    return Math.max(0, Math.ceil((codeExpiresAt - now) / 1000));
-  }, [codeExpiresAt, now]);
-
   const rateLimitRemaining = useMemo(() => {
     if (!rateLimitedUntil) return 0;
     return Math.max(0, Math.ceil((rateLimitedUntil - now) / 1000));
   }, [rateLimitedUntil, now]);
 
-  const currentState = useMemo<OtpState>(() => {
-    if (rateLimitedUntil && now < rateLimitedUntil) {
-      return "rate_limited";
+  const totpCycleRemaining = useMemo(() => {
+    const seconds = Math.floor(now / 1000);
+    return 30 - (seconds % 30);
+  }, [now]);
+
+  const showRecommendedTotp = useMemo(() => {
+    if (mode === "signup") {
+      return state === "signup_done" || state === "totp_setup_ready" || state === "totp_verified";
     }
+    return state === "authenticated" || state === "totp_setup_ready" || state === "totp_verified";
+  }, [mode, state]);
 
-    if ((otpState === "sent" || otpState === "invalid") && codeExpiresAt && now >= codeExpiresAt) {
-      return "expired";
-    }
-
-    if (otpState === "rate_limited" && (!rateLimitedUntil || now >= rateLimitedUntil)) {
-      return "idle";
-    }
-
-    return otpState;
-  }, [codeExpiresAt, now, otpState, rateLimitedUntil]);
-
-  async function sendOtp(channel: OtpChannel) {
+  async function signupWithPassword() {
     setFieldError(null);
-    setSendingChannel(channel);
-
+    setIsSubmitting(true);
     try {
-      const value = channel === "EMAIL" ? email : phone;
-      const response = await fetch("/api/auth/otp/request", {
+      const response = await fetch("/api/auth/password/signup", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ channel, value }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier, password }),
       });
-
-      const payload = (await response.json()) as unknown;
+      const payload = (await response.json()) as {
+        error?: string;
+        maskedIdentifier?: string;
+      };
 
       if (!response.ok) {
-        const apiError = payload as {
-          error?: string;
-          retryAfterSeconds?: number;
-          message?: string;
-          debugCode?: string;
-        };
-        if (response.status === 429) {
-          const retryAfterSeconds = apiError.retryAfterSeconds ?? 30;
-          setRateLimitedUntil(Date.now() + retryAfterSeconds * 1000);
-          setOtpState("rate_limited");
+        if (payload.error === "INVALID_PAYLOAD") {
+          setFieldError("Email invalide ou mot de passe trop court (minimum 10 caracteres).");
           return;
         }
-
-        if (apiError.debugCode) {
-          setDebugCode(apiError.debugCode);
-        }
-
-        if (apiError.error === "INVALID_IDENTIFIER") {
-          setFieldError(channel === "EMAIL" ? "Email invalide." : "Numero de telephone invalide.");
-        } else if (apiError.error === "DELIVERY_NOT_CONFIGURED") {
-          setFieldError(
-            "Envoi OTP non configure. Configure RESEND (email) ou TWILIO (SMS), ou lance en mode dev.",
-          );
-        } else {
-          setFieldError(apiError.message ?? "Impossible d'envoyer le code pour le moment.");
-        }
+        setFieldError("Inscription impossible.");
         return;
       }
 
-      const success = payload as OtpRequestSuccess;
-      const timestamp = Date.now();
-      setActiveChannel(channel);
-      setChallengeId(success.challengeId);
-      setMaskedIdentifier(success.maskedIdentifier);
-      setOtpCode("");
-      setOtpState("sent");
-      setResendAvailableAt(timestamp + success.resendInSeconds * 1000);
-      setCodeExpiresAt(timestamp + success.expiresInSeconds * 1000);
-      setRateLimitedUntil(null);
-      setDebugCode(success.debugCode ?? null);
+      setMaskedIdentifier(payload.maskedIdentifier ?? null);
+      setTotpEnabled(false);
+      setState("signup_done");
     } catch {
-      setFieldError("Erreur reseau. Reessayez dans quelques instants.");
+      setFieldError("Erreur reseau. Reessayez.");
     } finally {
-      setSendingChannel(null);
+      setIsSubmitting(false);
     }
   }
 
-  async function verifyOtp() {
+  async function loginWithPassword() {
     setFieldError(null);
-
-    if (!challengeId) {
-      setFieldError("Demandez d'abord un code OTP.");
-      return;
-    }
-
-    if (!otpCode.trim()) {
-      setFieldError("Entrez le code OTP recu.");
-      return;
-    }
-
-    setIsVerifying(true);
-
+    setIsSubmitting(true);
     try {
-      const response = await fetch("/api/auth/otp/verify", {
+      const response = await fetch("/api/auth/password/login", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          challengeId,
-          code: otpCode.trim(),
-        }),
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier, password }),
       });
-
-      const payload = (await response.json()) as { status?: string; error?: string };
+      const payload = (await response.json()) as {
+        error?: string;
+        totpEnabled?: boolean;
+        maskedIdentifier?: string;
+      };
 
       if (!response.ok) {
-        if (response.status === 429 || payload.error === "RATE_LIMITED") {
-          setOtpState("rate_limited");
-          setRateLimitedUntil(Date.now() + 30 * 1000);
+        if (payload.error === "INVALID_CREDENTIALS") {
+          setFieldError("Identifiant ou mot de passe invalide.");
           return;
         }
-
-        if (payload.error === "OTP_EXPIRED") {
-          setOtpState("expired");
-          return;
-        }
-
-        if (payload.error === "OTP_INVALID") {
-          setOtpState("invalid");
-          setFieldError("Code OTP invalide.");
-          return;
-        }
-
-        setFieldError("Verification indisponible pour le moment.");
+        setFieldError("Connexion impossible.");
         return;
       }
 
-      if (payload.status === "VERIFIED") {
-        setOtpState("verified");
-      }
+      setMaskedIdentifier(payload.maskedIdentifier ?? null);
+      setTotpEnabled(Boolean(payload.totpEnabled));
+      setState("authenticated");
     } catch {
-      setFieldError("Erreur reseau. Reessayez dans quelques instants.");
+      setFieldError("Erreur reseau. Reessayez.");
     } finally {
-      setIsVerifying(false);
+      setIsSubmitting(false);
+    }
+  }
+
+  async function setupTotp() {
+    setFieldError(null);
+    setIsSubmitting(true);
+    try {
+      const response = await fetch("/api/auth/totp/setup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier }),
+      });
+      const payload = (await response.json()) as unknown;
+      if (!response.ok) {
+        const apiError = payload as { error?: string };
+        setFieldError(apiError.error === "INVALID_IDENTIFIER" ? "Email invalide." : "Setup TOTP indisponible.");
+        return;
+      }
+
+      const data = payload as SetupResponse;
+      setCredentialId(data.credentialId);
+      setSecret(data.secret);
+      setOtpauthUri(data.otpauthUri);
+      setQrCodeDataUrl(data.qrCodeDataUrl);
+      setMaskedIdentifier(data.maskedIdentifier);
+      setTotpCode("");
+      setState("totp_setup_ready");
+    } catch {
+      setFieldError("Erreur reseau. Reessayez.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  async function verifyTotpSetup() {
+    setFieldError(null);
+    if (!credentialId) {
+      setFieldError("Configurez d'abord l'application OTP.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const response = await fetch("/api/auth/totp/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credentialId, code: totpCode, password }),
+      });
+      const payload = (await response.json()) as { error?: string; retryAfterSeconds?: number };
+
+      if (!response.ok) {
+        if (response.status === 429 || payload.error === "RATE_LIMITED") {
+          const retry = payload.retryAfterSeconds ?? 30;
+          setRateLimitedUntil(Date.now() + retry * 1000);
+          setState("rate_limited");
+          return;
+        }
+        if (payload.error === "TOTP_INVALID") {
+          setState("invalid");
+          setFieldError("Code invalide.");
+          return;
+        }
+        if (payload.error === "TOTP_REPLAYED") {
+          setState("expired");
+          setFieldError("Code deja utilise. Attendez le prochain code.");
+          return;
+        }
+        if (payload.error === "PASSWORD_REQUIRED") {
+          setFieldError("Mot de passe invalide (minimum 10 caracteres).");
+          return;
+        }
+        setFieldError("Activation OTP impossible.");
+        return;
+      }
+
+      setTotpEnabled(true);
+      setState("totp_verified");
+    } catch {
+      setFieldError("Erreur reseau. Reessayez.");
+    } finally {
+      setIsSubmitting(false);
     }
   }
 
   const statusClass =
-    currentState === "verified"
+    state === "authenticated" || state === "signup_done" || state === "totp_verified"
       ? "border-emerald-300/35 bg-emerald-300/10 text-emerald-100"
-      : currentState === "rate_limited" || currentState === "invalid" || currentState === "expired"
+      : state === "invalid" || state === "expired" || state === "rate_limited"
         ? "border-rose-300/35 bg-rose-300/10 text-rose-100"
         : "border-cyan-300/35 bg-cyan-300/10 text-cyan-100";
 
   const statusText =
-    currentState === "sent"
-      ? `OTP envoye via ${activeChannel === "SMS" ? "SMS" : "email"}${
-          maskedIdentifier ? ` (${maskedIdentifier})` : ""
-        } - expiration dans ${formatTimer(expiryRemaining)}`
-      : currentState === "invalid"
-        ? "Code OTP invalide."
-        : currentState === "expired"
-          ? "Code OTP expire. Renvoyez un nouveau code."
-          : currentState === "rate_limited"
-            ? `Trop de tentatives. Reessayez dans ${formatTimer(rateLimitRemaining)}.`
-            : currentState === "verified"
-              ? "Verification reussie. Vous pouvez continuer."
-              : "Aucun code envoye pour le moment.";
+    state === "authenticated"
+      ? "Connexion reussie."
+      : state === "signup_done"
+        ? "Compte cree avec succes. L'OTP est recommande pour renforcer la securite."
+        : state === "totp_setup_ready"
+          ? "Scannez le QR code puis confirmez avec un code OTP."
+          : state === "totp_verified"
+            ? "OTP active avec succes."
+            : state === "invalid"
+              ? "Code OTP invalide."
+              : state === "expired"
+                ? "Code OTP expire ou deja utilise."
+                : state === "rate_limited"
+                  ? `Trop de tentatives. Reessayez dans ${formatTimer(rateLimitRemaining)}.`
+                  : "Entrez vos identifiants pour continuer.";
 
   return (
     <div className="mx-auto flex min-h-screen max-w-7xl items-center px-6 py-14">
@@ -282,37 +302,33 @@ export function AuthGateway() {
             Self-Audit Numerique
           </Link>
           <h1 className="mt-8 max-w-lg text-4xl leading-tight font-semibold text-white sm:text-5xl">
-            Connexion et verification rapide
+            Connexion rapide et securisee
           </h1>
           <p className="mt-5 max-w-xl text-slate-300">
-            Acces sans friction avec OAuth, email OTP ou SMS OTP pour confirmer que vous auditez
-            uniquement vos propres identifiants.
+            L&apos;OTP application n&apos;est pas obligatoire pour vous connecter, mais fortement recommande
+            apres connexion.
           </p>
           <p className="mt-8 rounded-2xl border border-amber-200/35 bg-amber-300/10 p-4 text-sm text-amber-100">
             Cet outil ne permet pas de rechercher des tiers. Seuls les identifiants que vous
             verifiez peuvent etre scannes.
           </p>
-          <details className="mt-4 w-fit rounded-lg border border-white/15 bg-white/5 px-4 py-2 text-sm text-slate-200">
-            <summary className="cursor-pointer list-none font-medium text-cyan-100">
-              Pourquoi cette verification ?
-            </summary>
-            <p className="mt-2 max-w-xl text-slate-300">
-              Cette etape limite les abus, prouve le consentement et renforce la conformite RGPD.
-            </p>
-          </details>
         </section>
 
         <section className="glass-panel appear-up appear-delay-1 rounded-3xl p-6 sm:p-8">
           <div
             role="tablist"
-            aria-label="Mode de connexion"
+            aria-label="Mode d'authentification"
             className="mb-6 grid grid-cols-2 rounded-xl border border-white/15 bg-white/5 p-1"
           >
             <button
               type="button"
               role="tab"
               aria-selected={mode === "login"}
-              onClick={() => setMode("login")}
+              onClick={() => {
+                setMode("login");
+                setFieldError(null);
+                setState("idle");
+              }}
               className={`rounded-lg px-3 py-2 text-sm font-semibold transition ${
                 mode === "login"
                   ? "bg-cyan-300/20 text-cyan-100"
@@ -325,7 +341,11 @@ export function AuthGateway() {
               type="button"
               role="tab"
               aria-selected={mode === "signup"}
-              onClick={() => setMode("signup")}
+              onClick={() => {
+                setMode("signup");
+                setFieldError(null);
+                setState("idle");
+              }}
               className={`rounded-lg px-3 py-2 text-sm font-semibold transition ${
                 mode === "signup"
                   ? "bg-cyan-300/20 text-cyan-100"
@@ -335,12 +355,6 @@ export function AuthGateway() {
               Inscription
             </button>
           </div>
-
-          <p className="mb-4 text-sm text-slate-300">
-            {mode === "login"
-              ? "Connectez-vous a votre espace securise."
-              : "Creez votre compte en moins de 60 secondes."}
-          </p>
 
           <div className="space-y-3">
             <button
@@ -383,116 +397,153 @@ export function AuthGateway() {
 
           <div className="my-6 flex items-center gap-3 text-xs text-slate-400">
             <span className="h-px flex-1 bg-white/15" />
-            <span>ou</span>
+            <span>ou avec mot de passe</span>
             <span className="h-px flex-1 bg-white/15" />
           </div>
 
-          <div className="space-y-5">
+          <div className="space-y-4">
             <div>
-              <label htmlFor="email" className="mb-2 block text-sm font-medium text-slate-200">
+              <label htmlFor="identifier" className="mb-2 block text-sm font-medium text-slate-200">
                 Email
               </label>
-              <div className="flex items-center gap-2">
-                <input
-                  id="email"
-                  type="email"
-                  autoComplete="email"
-                  value={email}
-                  onChange={(event) => setEmail(event.target.value)}
-                  className="w-full rounded-lg border border-white/20 bg-slate-950/70 px-3.5 py-2.5 text-sm text-white placeholder:text-slate-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
-                  placeholder="exemple@domaine.fr"
-                />
-                <button
-                  type="button"
-                  onClick={() => sendOtp("EMAIL")}
-                  disabled={sendingChannel === "EMAIL"}
-                  className="min-w-[9.5rem] shrink-0 whitespace-nowrap rounded-lg bg-gradient-to-r from-cyan-400 to-indigo-400 px-3.5 py-2.5 text-sm font-semibold text-slate-950 transition hover:brightness-110 disabled:opacity-70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
-                >
-                  {sendingChannel === "EMAIL" ? "Envoi..." : "Envoyer un code"}
-                </button>
-              </div>
+              <input
+                id="identifier"
+                type="email"
+                autoComplete="email"
+                value={identifier}
+                onChange={(event) => setIdentifier(event.target.value)}
+                className="w-full rounded-lg border border-white/20 bg-slate-950/70 px-3.5 py-2.5 text-sm text-white placeholder:text-slate-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+                placeholder="exemple@domaine.fr"
+              />
             </div>
 
             <div>
-              <label htmlFor="phone" className="mb-2 block text-sm font-medium text-slate-200">
-                Telephone
+              <label htmlFor="password" className="mb-2 block text-sm font-medium text-slate-200">
+                Mot de passe
               </label>
-              <div className="flex items-center gap-2">
-                <input
-                  id="phone"
-                  type="tel"
-                  autoComplete="tel"
-                  value={phone}
-                  onChange={(event) => setPhone(event.target.value)}
-                  className="w-full rounded-lg border border-white/20 bg-slate-950/70 px-3.5 py-2.5 text-sm text-white placeholder:text-slate-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
-                  placeholder="+33 6 12 34 56 78"
-                />
-                <button
-                  type="button"
-                  onClick={() => sendOtp("SMS")}
-                  disabled={sendingChannel === "SMS"}
-                  className="min-w-[9.5rem] shrink-0 whitespace-nowrap rounded-lg bg-gradient-to-r from-cyan-400 to-indigo-400 px-3.5 py-2.5 text-sm font-semibold text-slate-950 transition hover:brightness-110 disabled:opacity-70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
-                >
-                  {sendingChannel === "SMS" ? "Envoi..." : "Envoyer un SMS"}
-                </button>
-              </div>
+              <input
+                id="password"
+                type="password"
+                autoComplete={mode === "login" ? "current-password" : "new-password"}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                className="w-full rounded-lg border border-white/20 bg-slate-950/70 px-3.5 py-2.5 text-sm text-white placeholder:text-slate-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+                placeholder="Minimum 10 caracteres"
+              />
             </div>
+
+            {mode === "signup" ? (
+              <button
+                type="button"
+                onClick={signupWithPassword}
+                disabled={isSubmitting || !identifier || password.length < 10}
+                className="w-full rounded-lg bg-gradient-to-r from-cyan-400 to-indigo-400 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+              >
+                {isSubmitting ? "Creation..." : "Creer mon compte"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={loginWithPassword}
+                disabled={isSubmitting || !identifier || !password}
+                className="w-full rounded-lg bg-gradient-to-r from-cyan-400 to-indigo-400 px-4 py-2.5 text-sm font-semibold text-slate-950 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+              >
+                {isSubmitting ? "Connexion..." : "Se connecter"}
+              </button>
+            )}
           </div>
 
           <div className={`mt-6 rounded-xl border px-4 py-3 text-sm ${statusClass}`} aria-live="polite">
             {statusText}
-            {currentState === "sent" && resendRemaining > 0 && (
-              <p className="mt-1 text-xs text-cyan-100/90">
-                Nouveau code disponible dans {formatTimer(resendRemaining)}.
-              </p>
-            )}
           </div>
 
-          {(currentState === "sent" ||
-            currentState === "invalid" ||
-            currentState === "expired" ||
-            currentState === "verified") && (
-            <div className="mt-5 space-y-3 rounded-2xl border border-white/15 bg-white/5 p-4">
-              <label htmlFor="otp" className="block text-sm font-medium text-slate-200">
-                Code OTP
-              </label>
-              <input
-                id="otp"
-                inputMode="numeric"
-                maxLength={6}
-                autoComplete="one-time-code"
-                value={otpCode}
-                onChange={(event) => setOtpCode(event.target.value.replace(/\D/g, ""))}
-                className="w-full rounded-lg border border-white/20 bg-slate-950/70 px-3.5 py-2.5 text-sm tracking-[0.3em] text-white placeholder:text-slate-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
-                placeholder="000000"
-              />
-              <div className="flex flex-wrap gap-2">
+          {showRecommendedTotp && (
+            <div className="mt-5 rounded-2xl border border-cyan-300/25 bg-cyan-300/10 p-4">
+              <p className="text-sm font-semibold text-cyan-100">
+                OTP recommande apres connexion
+              </p>
+              <p className="mt-1 text-xs text-slate-300">
+                Activez Google/Microsoft Authenticator pour renforcer la securite de votre compte.
+              </p>
+
+              {!totpEnabled && state !== "totp_setup_ready" && state !== "totp_verified" && (
                 <button
                   type="button"
-                  onClick={verifyOtp}
-                  disabled={isVerifying}
-                  className="rounded-xl bg-cyan-300/20 px-4 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-300/30 disabled:opacity-70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+                  onClick={setupTotp}
+                  disabled={isSubmitting || !identifier}
+                  className="mt-3 rounded-lg border border-cyan-300/45 bg-cyan-300/15 px-3 py-2 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/25 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
                 >
-                  {isVerifying ? "Verification..." : "Verifier le code"}
+                  Configurer Authenticator (recommande)
                 </button>
-                <button
-                  type="button"
-                  disabled={!activeChannel || resendRemaining > 0 || !!sendingChannel}
-                  onClick={() => activeChannel && sendOtp(activeChannel)}
-                  className="rounded-xl border border-white/20 px-4 py-2 text-sm font-semibold text-slate-100 transition hover:border-white/40 hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
-                >
-                  Renvoyer
-                </button>
-              </div>
+              )}
+
+              {(state === "totp_setup_ready" || state === "totp_verified") && (
+                <div className="mt-4 space-y-3 rounded-xl border border-white/15 bg-white/5 p-3 text-sm text-slate-200">
+                  {qrCodeDataUrl && (
+                    <div className="flex justify-center">
+                      <Image
+                        src={qrCodeDataUrl}
+                        alt="QR code pour ajouter Self-Audit Numerique dans Google ou Microsoft Authenticator"
+                        width={210}
+                        height={210}
+                        className="rounded-md border border-white/20 bg-white p-2"
+                      />
+                    </div>
+                  )}
+                  <p>
+                    Identifiant: <span className="font-medium">{maskedIdentifier}</span>
+                  </p>
+                  <p>
+                    Cle secrete: <span className="font-mono tracking-wider">{secret}</span>
+                  </p>
+                  <a
+                    href={otpauthUri ?? "#"}
+                    className="inline-flex rounded-md border border-cyan-300/35 bg-cyan-300/10 px-3 py-1.5 text-xs font-semibold text-cyan-100 transition hover:bg-cyan-300/20 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+                  >
+                    Ouvrir dans l&apos;application OTP
+                  </a>
+
+                  {state !== "totp_verified" && (
+                    <>
+                      <div>
+                        <label htmlFor="totp" className="mb-2 block text-xs font-medium text-slate-200">
+                          Code OTP (6 chiffres)
+                        </label>
+                        <input
+                          id="totp"
+                          inputMode="numeric"
+                          maxLength={6}
+                          autoComplete="one-time-code"
+                          value={totpCode}
+                          onChange={(event) => setTotpCode(event.target.value.replace(/\D/g, ""))}
+                          className="w-full rounded-lg border border-white/20 bg-slate-950/70 px-3 py-2 text-sm tracking-[0.3em] text-white placeholder:text-slate-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+                          placeholder="000000"
+                        />
+                        <p className="mt-2 text-xs text-slate-400">
+                          Nouveau code dans {totpCycleRemaining}s
+                        </p>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={verifyTotpSetup}
+                        disabled={isSubmitting || !credentialId || !totpCode || password.length < 10}
+                        className="w-full rounded-lg bg-cyan-300/20 px-4 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-300/30 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+                      >
+                        {isSubmitting ? "Activation..." : "Activer OTP"}
+                      </button>
+                    </>
+                  )}
+
+                  {state === "totp_verified" && (
+                    <p className="text-xs text-emerald-100">OTP active. Recommandation appliquee.</p>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
           {fieldError && <p className="mt-4 text-sm text-rose-200">{fieldError}</p>}
-          {debugCode && (
-            <p className="mt-4 text-xs text-slate-400">
-              Dev seulement: code OTP de test = <span className="font-mono text-slate-200">{debugCode}</span>
-            </p>
-          )}
         </section>
       </div>
     </div>

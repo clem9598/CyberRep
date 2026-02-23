@@ -42,22 +42,19 @@ Open `http://localhost:3000`.
 - PostgreSQL 16 (`docker-compose.yml`)
 - Prisma 7 + `@prisma/adapter-pg` for typed data access
 - Models included for:
-  - Auth and identity verification (`User`, `VerifiedIdentifier`, `OtpChallenge`)
+  - Auth and identity verification (`User`, `VerifiedIdentifier`, `TotpCredential`, `OtpChallenge`)
   - Consent trail (`ConsentProof`)
   - Audit pipeline (`AuditScope`, `ScanJob`, `ExposureFinding`, `RemediationAction`)
   - Privacy operations and access logging (`PrivacyRequest`, `AccessLog`)
 
-The OTP API endpoints are persisted in DB:
-- `POST /api/auth/otp/request`
-- `POST /api/auth/otp/verify`
+TOTP API endpoints (Google/Microsoft Authenticator compatible):
+- `POST /api/auth/totp/setup` (provisioning secret + otpauth URI)
+- `POST /api/auth/totp/verify` (activation + consent proof)
+- `POST /api/auth/password/login` (step 1: email + password)
+- `POST /api/auth/totp/login` (step 2: OTP after password session)
 
-Real OTP delivery providers:
-- Email: Resend (`RESEND_API_KEY`, `OTP_EMAIL_FROM`)
-- SMS: Twilio (`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`)
-
-If providers are not configured:
-- Development: debug fallback (code shown in UI)
-- Production: API returns delivery configuration error
+TOTP secret encryption:
+- set `TOTP_ENCRYPTION_KEY` in `.env` (required in production)
 
 ## Useful scripts
 
@@ -72,9 +69,10 @@ npm run db:studio
 
 ## Security notes (current scope)
 
-- OTP codes are hashed in DB.
+- TOTP secrets are encrypted at rest (AES-256-GCM).
+- Passwords are salted + hashed (`scrypt`).
 - Identifiers are stored as hash + masked display value.
-- Per-identifier rate limiting is enforced in DB.
+- Verification includes anti-replay (`lastUsedStep`) + temporary lock on repeated failures.
 - No third-party scanning flow is implemented.
 
-For production, set strong secrets (`OTP_PEPPER`), hardened Postgres settings, and add a real message provider (email/SMS).
+For production, set strong secrets (`OTP_PEPPER`, `TOTP_ENCRYPTION_KEY`), hardened Postgres settings, and connect OAuth providers.
