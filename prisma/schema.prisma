@@ -1,0 +1,255 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum IdentifierType {
+  EMAIL
+  PHONE
+  OAUTH
+}
+
+enum OAuthProvider {
+  GOOGLE
+  MICROSOFT
+  APPLE
+}
+
+enum OtpChannel {
+  EMAIL
+  SMS
+}
+
+enum OtpChallengeStatus {
+  SENT
+  VERIFIED
+  EXPIRED
+  FAILED
+  RATE_LIMITED
+}
+
+enum ConsentPurpose {
+  SELF_AUDIT
+  ACCOUNT_SECURITY
+  PRIVACY_REQUEST
+}
+
+enum AuditScopeStatus {
+  ACTIVE
+  REVOKED
+}
+
+enum ScanSource {
+  PUBLIC_WEB
+  BREACH_DB
+  DATA_BROKER
+  DARK_WEB
+}
+
+enum ScanJobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum FindingSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum RemediationStatus {
+  OPEN
+  IN_PROGRESS
+  DONE
+  DISMISSED
+}
+
+enum PrivacyRequestType {
+  EXPORT
+  DELETE
+  RETENTION_CHANGE
+}
+
+enum PrivacyRequestStatus {
+  PENDING
+  PROCESSING
+  DONE
+  REJECTED
+}
+
+model User {
+  id              String              @id @default(uuid()) @db.Uuid
+  status          UserStatus          @default(ACTIVE)
+  displayName     String?             @db.VarChar(120)
+  lastLoginAt     DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  identifiers     VerifiedIdentifier[]
+  consentProofs   ConsentProof[]
+  auditScopes     AuditScope[]
+  privacyRequests PrivacyRequest[]
+  accessLogs      AccessLog[]
+}
+
+model VerifiedIdentifier {
+  id                String           @id @default(uuid()) @db.Uuid
+  type              IdentifierType
+  valueHash         String           @db.VarChar(128)
+  valueMasked       String           @db.VarChar(160)
+  provider          OAuthProvider?
+  providerAccountId String?          @db.VarChar(191)
+  verifiedAt        DateTime?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  userId            String?          @db.Uuid
+  user              User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
+  otpChallenges     OtpChallenge[]
+  consentProofs     ConsentProof[]
+  auditScopes       AuditScope[]
+
+  @@unique([type, valueHash])
+  @@unique([provider, providerAccountId])
+  @@index([userId, type])
+  @@index([type, createdAt])
+}
+
+model OtpChallenge {
+  id                String             @id @default(uuid()) @db.Uuid
+  identifierId      String             @db.Uuid
+  identifier        VerifiedIdentifier @relation(fields: [identifierId], references: [id], onDelete: Cascade)
+  channel           OtpChannel
+  codeHash          String             @db.VarChar(128)
+  status            OtpChallengeStatus @default(SENT)
+  attempts          Int                @default(0)
+  maxAttempts       Int                @default(5)
+  expiresAt         DateTime
+  resendAvailableAt DateTime
+  requestedIpHash   String?            @db.VarChar(128)
+  userAgent         String?            @db.VarChar(512)
+  verifiedAt        DateTime?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@index([identifierId, createdAt])
+  @@index([expiresAt])
+  @@index([status, createdAt])
+}
+
+model ConsentProof {
+  id            String             @id @default(uuid()) @db.Uuid
+  purpose       ConsentPurpose
+  policyVersion String             @db.VarChar(32)
+  acceptedAt    DateTime           @default(now())
+  ipHash        String?            @db.VarChar(128)
+  userAgent     String?            @db.VarChar(512)
+  userId        String?            @db.Uuid
+  identifierId  String             @db.Uuid
+  user          User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  identifier    VerifiedIdentifier @relation(fields: [identifierId], references: [id], onDelete: Cascade)
+
+  @@index([identifierId, acceptedAt])
+  @@index([userId, acceptedAt])
+}
+
+model AuditScope {
+  id           String             @id @default(uuid()) @db.Uuid
+  userId       String             @db.Uuid
+  identifierId String             @db.Uuid
+  status       AuditScopeStatus   @default(ACTIVE)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  revokedAt    DateTime?
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  identifier   VerifiedIdentifier @relation(fields: [identifierId], references: [id], onDelete: Cascade)
+  scanJobs     ScanJob[]
+  findings     ExposureFinding[]
+
+  @@unique([userId, identifierId])
+  @@index([status, createdAt])
+}
+
+model ScanJob {
+  id         String       @id @default(uuid()) @db.Uuid
+  scopeId    String       @db.Uuid
+  source     ScanSource
+  status     ScanJobStatus @default(PENDING)
+  queuedAt   DateTime     @default(now())
+  startedAt  DateTime?
+  finishedAt DateTime?
+  errorCode  String?      @db.VarChar(80)
+  scope      AuditScope   @relation(fields: [scopeId], references: [id], onDelete: Cascade)
+
+  @@index([scopeId, status, queuedAt])
+}
+
+model ExposureFinding {
+  id                String            @id @default(uuid()) @db.Uuid
+  scopeId           String            @db.Uuid
+  source            ScanSource
+  severity          FindingSeverity
+  title             String            @db.VarChar(180)
+  description       String?
+  externalReference String?           @db.VarChar(255)
+  discoveredAt      DateTime          @default(now())
+  resolvedAt        DateTime?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  scope             AuditScope        @relation(fields: [scopeId], references: [id], onDelete: Cascade)
+  actions           RemediationAction[]
+
+  @@index([scopeId, severity, discoveredAt])
+  @@index([resolvedAt])
+}
+
+model RemediationAction {
+  id        String            @id @default(uuid()) @db.Uuid
+  findingId String            @db.Uuid
+  title     String            @db.VarChar(180)
+  guidance  String?
+  priority  Int               @default(50)
+  status    RemediationStatus @default(OPEN)
+  dueAt     DateTime?
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  finding   ExposureFinding   @relation(fields: [findingId], references: [id], onDelete: Cascade)
+
+  @@index([findingId, status, priority])
+}
+
+model PrivacyRequest {
+  id          String               @id @default(uuid()) @db.Uuid
+  userId      String               @db.Uuid
+  type        PrivacyRequestType
+  status      PrivacyRequestStatus @default(PENDING)
+  details     Json?
+  requestedAt DateTime             @default(now())
+  completedAt DateTime?
+  user        User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status, requestedAt])
+}
+
+model AccessLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String?  @db.Uuid
+  eventType String   @db.VarChar(80)
+  resource  String?  @db.VarChar(160)
+  metadata  Json?
+  createdAt DateTime @default(now())
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([eventType, createdAt])
+}
