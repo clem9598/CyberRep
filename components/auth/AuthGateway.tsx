@@ -2,7 +2,10 @@
 
 import Image from "next/image";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
+
+const AUTH_STORAGE_KEY = "san_authenticated";
 
 type AuthMode = "login" | "signup";
 type AuthState =
@@ -78,6 +81,7 @@ function AppleLogo() {
 }
 
 export function AuthGateway() {
+  const router = useRouter();
   const [mode, setMode] = useState<AuthMode>("login");
   const [state, setState] = useState<AuthState>("idle");
   const [identifier, setIdentifier] = useState("");
@@ -99,6 +103,13 @@ export function AuthGateway() {
     return () => window.clearInterval(intervalId);
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (window.localStorage.getItem(AUTH_STORAGE_KEY) === "1") {
+      router.replace("/dashboard");
+    }
+  }, [router]);
+
   const rateLimitRemaining = useMemo(() => {
     if (!rateLimitedUntil) return 0;
     return Math.max(0, Math.ceil((rateLimitedUntil - now) / 1000));
@@ -115,6 +126,12 @@ export function AuthGateway() {
     }
     return state === "authenticated" || state === "totp_setup_ready" || state === "totp_verified";
   }, [mode, state]);
+
+  function persistAuthenticatedClientState() {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(AUTH_STORAGE_KEY, "1");
+    window.dispatchEvent(new Event("san-auth-changed"));
+  }
 
   async function signupWithPassword() {
     setFieldError(null);
@@ -142,6 +159,7 @@ export function AuthGateway() {
       setMaskedIdentifier(payload.maskedIdentifier ?? null);
       setTotpEnabled(false);
       setState("signup_done");
+      persistAuthenticatedClientState();
     } catch {
       setFieldError("Erreur reseau. Reessayez.");
     } finally {
@@ -176,6 +194,8 @@ export function AuthGateway() {
       setMaskedIdentifier(payload.maskedIdentifier ?? null);
       setTotpEnabled(Boolean(payload.totpEnabled));
       setState("authenticated");
+      persistAuthenticatedClientState();
+      router.push("/dashboard");
     } catch {
       setFieldError("Erreur reseau. Reessayez.");
     } finally {

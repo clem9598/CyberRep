@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+
+const AUTH_STORAGE_KEY = "san_authenticated";
 
 const navLinks = [
   { href: "#pricing", label: "Tarifs" },
@@ -12,6 +14,34 @@ const navLinks = [
 
 export function Navbar() {
   const [open, setOpen] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(AUTH_STORAGE_KEY) === "1";
+  });
+
+  const refreshAuthState = () => {
+    const authValue = window.localStorage.getItem(AUTH_STORAGE_KEY);
+    setIsAuthenticated(authValue === "1");
+  };
+
+  useEffect(() => {
+    window.addEventListener("focus", refreshAuthState);
+    window.addEventListener("storage", refreshAuthState);
+    window.addEventListener("san-auth-changed", refreshAuthState as EventListener);
+
+    return () => {
+      window.removeEventListener("focus", refreshAuthState);
+      window.removeEventListener("storage", refreshAuthState);
+      window.removeEventListener("san-auth-changed", refreshAuthState as EventListener);
+    };
+  }, []);
+
+  const logout = () => {
+    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    window.dispatchEvent(new Event("san-auth-changed"));
+    setOpen(false);
+    setIsAuthenticated(false);
+  };
 
   return (
     <header className="sticky top-0 z-50 border-b border-white/10 bg-slate-950/65 backdrop-blur-xl">
@@ -40,18 +70,38 @@ export function Navbar() {
         </nav>
 
         <div className="hidden items-center gap-3 md:flex">
-          <Link
-            href="/auth"
-            className="rounded-lg border border-white/20 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-white/40 hover:bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
-          >
-            Connexion
-          </Link>
-          <Link
-            href="/auth"
-            className="rounded-lg bg-gradient-to-r from-cyan-400 to-indigo-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
-          >
-            Commencer mon auto-audit
-          </Link>
+          {isAuthenticated ? (
+            <>
+              <Link
+                href="/dashboard"
+                className="rounded-lg bg-gradient-to-r from-cyan-400 to-indigo-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+              >
+                Ouvrir le dashboard
+              </Link>
+              <button
+                type="button"
+                onClick={logout}
+                className="rounded-lg border border-white/20 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-white/40 hover:bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+              >
+                Se deconnecter
+              </button>
+            </>
+          ) : (
+            <>
+              <Link
+                href="/auth"
+                className="rounded-lg border border-white/20 px-4 py-2 text-sm font-medium text-slate-200 transition hover:border-white/40 hover:bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+              >
+                Connexion
+              </Link>
+              <Link
+                href="/auth"
+                className="rounded-lg bg-gradient-to-r from-cyan-400 to-indigo-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+              >
+                Commencer mon auto-audit
+              </Link>
+            </>
+          )}
         </div>
 
         <button
@@ -89,18 +139,38 @@ export function Navbar() {
               {link.label}
             </a>
           ))}
-          <Link
-            href="/auth"
-            className="mt-2 rounded-lg border border-white/20 px-4 py-2 text-center text-sm font-medium text-slate-200 transition hover:border-white/40 hover:bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
-          >
-            Connexion
-          </Link>
-          <Link
-            href="/auth"
-            className="rounded-lg bg-gradient-to-r from-cyan-400 to-indigo-400 px-4 py-2 text-center text-sm font-semibold text-slate-950 transition hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
-          >
-            Commencer mon auto-audit
-          </Link>
+          {isAuthenticated ? (
+            <>
+              <Link
+                href="/dashboard"
+                className="mt-2 rounded-lg bg-gradient-to-r from-cyan-400 to-indigo-400 px-4 py-2 text-center text-sm font-semibold text-slate-950 transition hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+              >
+                Ouvrir le dashboard
+              </Link>
+              <button
+                type="button"
+                onClick={logout}
+                className="rounded-lg border border-white/20 px-4 py-2 text-center text-sm font-medium text-slate-200 transition hover:border-white/40 hover:bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+              >
+                Se deconnecter
+              </button>
+            </>
+          ) : (
+            <>
+              <Link
+                href="/auth"
+                className="mt-2 rounded-lg border border-white/20 px-4 py-2 text-center text-sm font-medium text-slate-200 transition hover:border-white/40 hover:bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+              >
+                Connexion
+              </Link>
+              <Link
+                href="/auth"
+                className="rounded-lg bg-gradient-to-r from-cyan-400 to-indigo-400 px-4 py-2 text-center text-sm font-semibold text-slate-950 transition hover:brightness-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-300"
+              >
+                Commencer mon auto-audit
+              </Link>
+            </>
+          )}
         </nav>
       </div>
     </header>
