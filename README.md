@@ -76,3 +76,11 @@ npm run db:studio
 - No third-party scanning flow is implemented.
 
 For production, set strong secrets (`OTP_PEPPER`, `TOTP_ENCRYPTION_KEY`), hardened Postgres settings, and connect OAuth providers.
+
+## Deploy on Vercel
+
+This project is a standard Next.js app and can be deployed directly on Vercel with default settings:
+
+- Install command: `npm install`
+- Build command: `npm run build`
+- Output directory: `.next`
